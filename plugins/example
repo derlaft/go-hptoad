@@ -1,0 +1,11 @@
+#!/bin/bash
+
+user="$1" # nickname
+admin="$2" # if he is an admin
+
+if [ "$admin" != 'true' ]; then
+  echo "$user: you are not an admin"
+else
+  echo "$user: you are an admin"
+fi
+

@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# simple chat bot
+# with sending images to an external program
+# and ignoring some nicknames
+
+random() {
+    shuf -n1 -i "1-$1"
+}
+
+cd "$(dirname "$0")"
+
+if grep -q -- "$1" "ignore"; then
+exit 0
+fi
+
+echo -n "$1: "
+from=$(echo "$1" | tr -d '$`|<>')
+
+# Second argument shows whether user is an admin (useless).
+shift 2
+string=$(echo "$@" | tr -d '$`')
+if [[ ${#string} -gt 750 ]]; then
+    echo "tl;dr"
+    exit 0
+fi
+
+
+if [[ "$string" == *http*://* ]]; then
+    amount=$(sed -e '/https*:\/\//!d' ./frs.txt | wc -l)
+    # Makes it a bit more human (time to find a link?).
+    sleep 1
+    sed -e '/https*:\/\//!d' ./frs.txt | sed -n "$(random "$amount")p"
+    img="$(echo "$string" | sed -ne 's|.*\(https*://[^ \"()<>]*\).*|\1|g;1p')"
+    ns="$(echo "$string" | sed -e "s|$img||g")"
+    cl="$(wget --spider -S $(eval echo '$img') 2>&1)"
+    if [[ $(echo "$cl" | sed -e '/Content-Type/!d;/image\//!d') ]]; then
+        #echo 'posting'
+        #echo "$img" "$from" >> ~/data/pictures
+    fi
+else
+    amount="$(sed -e '/https*:\/\//d' ./frs.txt | wc -l)"
+    answer="$(sed -e '/https*:\/\//d' ./frs.txt | sed -ne "s/;;\\\n/\n/g;$(random "$amount")p")"
+    # Makes it a bit more human.
+    sleep "$(echo "${#answer} * 0.1" | bc -l)"
+    echo "$answer"
+fi
+if [[ ${#string} -lt 7 ]]; then
+    exit 0
+fi
+echo "$string" | sed -e '{:q;N;s/\n/;;\\n/g;t q}' >> ./frs.txt
+exit 0
