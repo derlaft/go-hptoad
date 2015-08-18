@@ -37,6 +37,8 @@ func main() {
 		Conn *xmpp.Conn
 		err  error
 	)
+
+START:
 	for {
 		if Conn != nil {
 			time.Sleep(5 * time.Second)
@@ -44,7 +46,7 @@ func main() {
 			time.Sleep(5 * time.Second)
 		}
 
-		Conn, err = xmpp.Dial(connect, id, server, password, resource, &xmpp.Config{SkipTLS: true})
+		Conn, err = xmpp.Dial(connect, id, server, password, resource, nil)
 		if err != nil {
 			log.Println("Conn", err)
 			continue
@@ -88,7 +90,7 @@ func main() {
 			case next = <-cs:
 			case <-time.After(65 * time.Second):
 				log.Println(Conn.Close(), "\n\t", "closed after 65 seconds of inactivity")
-				break
+				continue START
 			}
 			switch t := next.Value.(type) {
 			case *xmpp.ClientPresence:
