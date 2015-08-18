@@ -5,6 +5,7 @@ import (
 	"github.com/derlaft/xmpp"
 	"io/ioutil"
 	"log"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -25,9 +26,9 @@ const (
 )
 
 var (
-	ping  time.Time
 	admin []string
 	cs    = make(chan xmpp.Stanza)
+	stop  chan struct{}
 	next  xmpp.Stanza
 )
 
@@ -40,9 +41,12 @@ func main() {
 
 START:
 	for {
-		if Conn != nil {
-			time.Sleep(5 * time.Second)
-			log.Println("Conn check:", Conn.Close())
+		stop = make(chan struct{})
+		if(err != nil) {
+			admin = admin[:0]
+			if Conn != nil {
+				log.Println("Conn check:", Conn.Close())
+			}
 			time.Sleep(5 * time.Second)
 		}
 
@@ -55,46 +59,68 @@ START:
 			log.Println("Signal", err)
 			continue
 		}
-		if err := Conn.SendPresence(room+"/"+name, ""); err != nil {
+		if err := Conn.SendPresence(room + "/" + name, ""); err != nil {
 			log.Println("Presence", err)
 			continue
 		}
 
-		go func(Conn *xmpp.Conn) {
+		go func(Conn *xmpp.Conn, stop chan struct{}) {
 			for {
 				select {
 				case <-time.After(60 * time.Second):
 					Conn.SendIQ(server, "set", "<keepalive xmlns='urn:xmpp:keepalive:0'> <interval>60</interval> </keepalive>")
 					if _, _, err = Conn.SendIQ(server, "get", "<ping xmlns='urn:xmpp:ping'/>"); err != nil {
-						log.Println("KeepAlive err:", err)
+						select {
+						case <-stop:
+						default:
+							log.Println("KeepAlive err:", err)
+							close(stop)
+						}
 						return
 					}
-					ping = time.Now()
+					
+				case <-stop:
+					return
 				}
 			}
-		}(Conn)
+		}(Conn, stop)
 
-		go func(Conn *xmpp.Conn) {
+		go func(Conn *xmpp.Conn, stop chan struct{}) {
 			for {
 				next, err := Conn.Next()
 				if err != nil {
-					log.Println("Next err:", err)
+					select {
+					case <-stop:
+					default:
+						log.Println("KeepAlive err:", err)
+						close(stop)
+					}
 					return
 				}
 				cs <- next
 			}
-		}(Conn)
+		}(Conn, stop)
 
 		for {
 			select {
 			case next = <-cs:
+				
+			case <-stop:
+				Conn.Close()
+				Conn = nil
+				continue START
+				
 			case <-time.After(65 * time.Second):
 				log.Println(Conn.Close(), "\n\t", "closed after 65 seconds of inactivity")
+				close(stop)
+				Conn = nil
 				continue START
 			}
+			
 			switch t := next.Value.(type) {
 			case *xmpp.ClientPresence:
 				PresenceHandler(Conn, t)
+				
 			case *xmpp.ClientMessage:
 				if len(t.Delay.Stamp) == 0 && len(t.Subject) == 0 {
 					log.Println(t)
@@ -114,67 +140,86 @@ START:
 
 func SelfHandler(Conn *xmpp.Conn, Msg *xmpp.ClientMessage) {
 	Msg.Body = strings.TrimSpace(Msg.Body)
-	Conn.Send(room, "groupchat", Msg.Body)
-	if Msg.From == me+"/gsend" {
+	if(!strings.HasPrefix(Msg.Body, "!")) {
+		Conn.Send(room, "groupchat", Msg.Body)
 		return
 	}
-	Strip(&Msg.Body, &Msg.From)
-	if err := exec.Command("bash", "-c", GetCommand("!"+Msg.Body, Msg.From, "./func/")).Run(); err != nil {
+	command, err := GetCommand(Msg.Body, Msg.From, "./plugins/")
+	if(err != nil) {
+		Conn.Send(Msg.From, "chat", err.Error())
+		return
+	}
+	out, err := command.CombinedOutput()
+	if err != nil {
 		log.Println(err)
+		Conn.Send(Msg.From, "chat", err.Error())
 		return
 	}
+	Conn.Send(Msg.From, "chat", string(out))
 }
 
+var call = regexp.MustCompile("^" + name + "[:,]")
 func MessageHandler(Conn *xmpp.Conn, Msg *xmpp.ClientMessage) {
-	Msg.Body = strings.TrimSpace(Msg.Body)
-	f := func(s string, s2 *string) bool {
-		ok, _ := regexp.MatchString(s, *s2)
-		return ok
-	}
 	switch {
-	case f("^\\!megakick ", &Msg.Body):
-		Strip(&Msg.Body, &Msg.From)
-		s := (strings.Split(Msg.Body, "!megakick "))
+	case strings.HasPrefix(Msg.Body, "!megakick "):
+		s := strings.Split(Msg.Body, "!megakick ")
 		if in(admin, Msg.From) {
 			Conn.ModUse(room, s[1], "none", "")
 		} else {
 			Conn.Send(room, "groupchat", fmt.Sprintf("%s: GTFO", GetNick(Msg.From)))
 		}
-	case f("^\\!", &Msg.Body): //any external command
-		Strip(&Msg.Body, &Msg.From)
-		cmd := exec.Command("bash", "-c", GetCommand(Msg.Body, Msg.From, "./plugins/"))
+		
+	case strings.HasPrefix(Msg.Body, "!"): //any external command
+		cmd, err := GetCommand(Msg.Body, Msg.From, "./plugins/")
+		if(err != nil) {
+			Conn.Send(room, "groupchat", fmt.Sprintf("%s: WAT", GetNick(Msg.From)))
+			if(in(admin, Msg.From)) {
+				Conn.Send(Msg.From, "chat", err.Error())
+			}
+			return
+		}
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 		if err := cmd.Start(); err != nil {
 			log.Println(err)
+			Conn.Send(room, "groupchat", fmt.Sprintf("%s: WAT", GetNick(Msg.From)))
+			if(in(admin, Msg.From)) {
+				Conn.Send(Msg.From, "chat", err.Error())
+			}
 			return
 		}
 		out, _ := ioutil.ReadAll(stdout)
 		outerr, _ := ioutil.ReadAll(stderr)
-		if err := cmd.Wait(); err != nil {
-			if err.Error() == "exit status 127" {
-				Conn.Send(room, "groupchat", fmt.Sprintf("%s: WAT", GetNick(Msg.From)))
-				return
-			}
-		}
+		cmd.Wait()
 		if len(outerr) != 0 && in(admin, Msg.From) {
 			Conn.Send(Msg.From, "chat", string(outerr))
 		}
-		Conn.Send(room, "groupchat", strings.TrimRight(string(out), " \n"))
-	case f("^"+name, &Msg.Body): //chat
-		Strip(&Msg.Body, &Msg.From)
-		r, _ := regexp.Compile("^\\./chat/" + name + "[:,]")
-		command := r.ReplaceAllString(GetCommand("!"+Msg.Body, Msg.From, "./chat/"), "./chat/answer")
-		out, err := exec.Command("bash", "-c", command).CombinedOutput()
+		Conn.Send(room, "groupchat", string(out))
+		
+	case call.MatchString(Msg.Body): //chat
+		command, err := GetCommand(call.ReplaceAllString(Msg.Body, "!answer"), Msg.From, "./chat/")
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		Conn.Send(room, "groupchat", strings.TrimRight(string(out), " \n"))
+		out, err := command.CombinedOutput()
+		if err != nil {
+			log.Println(err)
+			if(in(admin, Msg.From)) {
+				Conn.Send(Msg.From, "chat", err.Error())
+			}
+			return
+		}
+		Conn.Send(room, "groupchat", string(out))
 	}
 }
 
 func PresenceHandler(Conn *xmpp.Conn, Prs *xmpp.ClientPresence) {
+	if(Prs.From == room + "/" + name && Prs.Item.Role == "none") {
+		log.Println("was kicked")
+		close(stop)
+		return
+	}
 	switch Prs.Item.Affiliation {
 	case "owner":
 		fallthrough
@@ -191,21 +236,31 @@ func PresenceHandler(Conn *xmpp.Conn, Prs *xmpp.ClientPresence) {
 	}
 }
 
-func GetCommand(body, from, dir string) string {
+//letter(ASCII or cyrillic), number, underscore only
+var cmd_validator = regexp.MustCompile("^!(\\w|\\p{Cyrillic})*$")
+func GetCommand(body, from, dir string) (*exec.Cmd, error) {
 	split := strings.SplitAfterN(body, " ", 2)
-	r, _ := regexp.Compile("^\\!")
-	command := r.ReplaceAllString(split[0], dir) + " '" + GetNick(from) + "' '" + strconv.FormatBool(in(admin, from)) + "'"
-	if len(split) == 2 {
-		command += " '" + split[1] + "'"
-	}
-	return command
+	cmd := strings.TrimSpace(split[0])
+	
+	if(!cmd_validator.MatchString(cmd)) { return nil, fmt.Errorf("Bad command \"%s\"", cmd) }
+	
+	var (
+		info os.FileInfo
+		err error
+	)
+	path := dir + Strip(cmd[1:])
+	if info, err = os.Stat(path); err != nil { return nil, err }
+	if info.IsDir() || info.Mode() & 0111 == 0 { return nil, fmt.Errorf("\"%s\" isn't executable", path) }
+	
+	args := []string{ Strip(GetNick(from)), strconv.FormatBool(in(admin, from)) }
+	if(len(split) > 1) { args = append(args, Strip(split[1])) }
+	return exec.Command(path, args...), nil
 }
 
-func Strip(s, s2 *string) {
-	strip, _ := regexp.Compile("(`|\\$|\\.\\.)")
-	q, _ := regexp.Compile("(\"|')")
-	*s = q.ReplaceAllString(strip.ReplaceAllString(*s, ""), "“")
-	*s2 = q.ReplaceAllString(strip.ReplaceAllString(*s2, ""), "“")
+var strip_regexp = regexp.MustCompile("(`|\\$|\\.\\.)")
+var quote_regexp = regexp.MustCompile("(\"|')")
+func Strip(s string) string {
+	return quote_regexp.ReplaceAllString(strip_regexp.ReplaceAllString(s, ""), "“")
 }
 
 func GetNick(s string) string {
