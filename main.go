@@ -155,7 +155,7 @@ func SelfHandler(Conn *xmpp.Conn, Msg *xmpp.ClientMessage) {
 		Conn.Send(Msg.From, "chat", err.Error())
 		return
 	}
-	Conn.Send(Msg.From, "chat", string(out))
+	Conn.Send(Msg.From, "chat", strings.TrimRight(string(out), " \t\n"))
 }
 
 var call = regexp.MustCompile("^" + name + "[:,]")
@@ -192,9 +192,9 @@ func MessageHandler(Conn *xmpp.Conn, Msg *xmpp.ClientMessage) {
 		outerr, _ := ioutil.ReadAll(stderr)
 		cmd.Wait()
 		if len(outerr) != 0 && in(admin, Msg.From) {
-			Conn.Send(Msg.From, "chat", string(outerr))
+			Conn.Send(Msg.From, "chat", strings.TrimRight(string(outerr), " \t\n"))
 		}
-		Conn.Send(room, "groupchat", string(out))
+		Conn.Send(room, "groupchat", strings.TrimRight(string(out), " \t\n"))
 		
 	case call.MatchString(Msg.Body): //chat
 		command, err := GetCommand(call.ReplaceAllString(Msg.Body, "!answer"), Msg.From, "./chat/")
@@ -210,7 +210,7 @@ func MessageHandler(Conn *xmpp.Conn, Msg *xmpp.ClientMessage) {
 			}
 			return
 		}
-		Conn.Send(room, "groupchat", string(out))
+		Conn.Send(room, "groupchat", strings.TrimRight(string(out), " \t\n"))
 	}
 }
 
